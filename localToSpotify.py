@@ -9,8 +9,8 @@ import glob
 from mutagen.id3 import ID3
 
 TOKEN_FILE = ".localToSpotify_token"
-CLIENT_ID = "" # Add yourself
-CLIENT_SECRET = "" # Add yourself
+CLIENT_ID = "ae6ec7e2fd6b4898a1af8abd277bbf4f" # Add yourself
+CLIENT_SECRET = "954dd478243640b1bbddc12d377fedf4" # Add yourself
 CLIENT_AUTH_B64 = base64.b64encode((CLIENT_ID + ":" + CLIENT_SECRET).encode('ascii'))
 REDIRECT_URI = "http://monfils.be/files/localToSpotify.php"
 
@@ -45,14 +45,14 @@ def refreshToken():
         print(response.content)
         exit() # TODO
 
-    global_token = json.loads(response.content)
+    global_token = json.loads(response.content.decode('utf-8'))
 
     with open(TOKEN_FILE, "w") as f:
         f.write(json.dumps(global_token))
 
-def get(url):
+def get(url, params={}):
     get_headers = {"Authorization": "Bearer " + global_token["access_token"]}
-    response = requests.get(url, headers=get_headers)
+    response = requests.get(url, headers=get_headers, params=params)
     if response.status_code == 401:
         print("Authentication expired, refreshing token...")
         refreshToken()
@@ -82,7 +82,7 @@ def createPlaylist(me, name):
         print(response.content)
         exit(1)
 
-    playlist = json.loads(response.content)
+    playlist = json.loads(response.content.decode('utf-8'))
     return playlist
 
 def getMe():
@@ -92,7 +92,7 @@ def getMe():
         print(response.content)
         exit(1)
 
-    return json.loads(response.content)
+    return json.loads(response.content.decode('utf-8'))
 
 def addToPlaylist(me, playlist, uris):
     uriChunks = [ uris[i:i+100] for i in range(0, len(uris), 100) ]
@@ -213,13 +213,14 @@ with open(TOKEN_FILE) as f:
 
             url = "https://api.spotify.com/v1/search"
             params = {"q": "track:" + title + " artist:" + artist, "type": "track", "limit": 8}
-            response = requests.get(url, params=params)
+            response = get(url, params)
             if response.status_code != 200:
                 print("Error: spotify search returned status code " + str(response.status_code) + ".")
+                print(response.content)
                 notAddedFiles.append(f)
                 continue
 
-            song = json.loads(response.content)
+            song = json.loads(response.content.decode('utf-8'))
 
             if len(song["tracks"]["items"]) == 0:
                 if verbose:
