@@ -6,6 +6,7 @@ import json
 import base64
 import os
 import glob
+import jellyfish
 from mutagen.id3 import ID3
 
 TOKEN_FILE = ".localToSpotify_token"
@@ -125,8 +126,8 @@ def getArtists(songInfo):
 
     return artists
 
-def sameSong(songInfo, title, artist, acceptRemasters, acceptArticleChanges):
-    if songInfo["name"].lower() != title.lower():
+def sameSong(songInfo, title, artist, acceptRemasters, acceptArticleChanges, maxDistance):
+    if jellyfish.levenshtein_distance(songInfo["name"].lower(), title.lower()) > maxDistance:
         remastered = acceptRemasters and "remaster" in songInfo["name"].lower()
         articleChange = acceptArticleChanges and songInfo["name"].lower()[4:] == title.lower()
         if acceptArticleChanges and articleChange or acceptRemasters and remastered:
@@ -135,16 +136,17 @@ def sameSong(songInfo, title, artist, acceptRemasters, acceptArticleChanges):
         return False
 
     for a in songInfo["artists"]:
-        articleChange = acceptArticleChanges and a["name"].lower()[4:] == artist.lower()
-        if a["name"].lower() == artist.lower() or articleChange:
+        articleChange = acceptArticleChanges and jellyfish.levenshtein_distance(a["name"].lower()[4:], artist.lower()) <= maxDistance
+        articleChange = articleChange or (acceptArticleChanges and a["name"].lower().contains(artist.lower()))
+        if jellyfish.levenshtein_distance(a["name"].lower(), artist.lower()) <= maxDistance or articleChange:
             return True
 
     return False
 
 
 # Check argv
-if len(sys.argv) < 3 or len(sys.argv) > 6:
-    print("Usage: python3 localToSpotify.py <Playlist name> <Directory> [-v] [--accept-remasters] [--accept-small-changes]")
+if len(sys.argv) < 3 or len(sys.argv) > 7:
+    print("Usage: python3 localToSpotify.py <Playlist name> <Directory> [-v] [--accept-remasters] [--accept-small-changes] [--accept-everything]")
     exit(1)
 
 verbose = False
@@ -158,6 +160,15 @@ if "--accept-remasters" in sys.argv:
 acceptArticleChanges = False
 if "--accept-article-changes" in sys.argv:
     acceptArticleChanges = True
+
+acceptSimilar = False
+if "--accept-similar" in sys.argv:
+    acceptSimilar = True
+
+if "--accept-everything" in sys.argv:
+    acceptRemasters = True
+    acceptArticleChanges = True
+    acceptSimilar = True
 
 if verbose:
     print("Accept remasters: " + str(acceptRemasters))
@@ -185,6 +196,8 @@ with open(TOKEN_FILE) as f:
     addedFiles = []
     noMetadataFiles = []
     notAddedFiles = []
+    
+    postponedFiles = [] # Files for which we'll ask the user at the end
 
     uris = []
 
@@ -227,37 +240,106 @@ with open(TOKEN_FILE) as f:
                     print("Error: could not find results for " + title + " by " + artist + ".")
                 notAddedFiles.append(f)
             else:
-                songInfo = song["tracks"]["items"][0]
-                if sameSong(songInfo, title, artist, acceptRemasters, acceptArticleChanges):
-                    if verbose:
-                        print("Found.")
-                    uris.append(songInfo["uri"])
-                    addedFiles.append(f)
-                else:
-                    print("Error: Found " + songInfo["name"] + " by " + ", ".join(getArtists(songInfo)) + " instead of " + title + " by " + artist + ".")
-
-                    print("Closest matches:")
-                    print("1) Don't add anything")
-                    for i in range(0, len(song["tracks"]["items"])):
-                        songInfo = song["tracks"]["items"][i]
-                        print(str(i + 2) + ") " + songInfo["name"] + " by " + ", ".join(getArtists(songInfo)))
-
-                    answer = input("Song to add? [2] ")
-
-                    if answer == "":
-                        answer = "2"
-
-                    if answer.isdigit() and int(answer) - 2 < len(song["tracks"]["items"]) and int(answer) != 1:
-                        i = int(answer) - 2
-                        uris.append(song["tracks"]["items"][i]["uri"])
+                found = False
+                for songInfo in song["tracks"]["items"]:
+                    if sameSong(songInfo, title, artist, acceptRemasters, acceptArticleChanges, 0):
+                        if verbose:
+                            print("Found.")
+                        uris.append(songInfo["uri"])
                         addedFiles.append(f)
-                    else:
-                        notAddedFiles.append(f)
+                        found = True
+                        break
+
+                if not found:
+                    found = False
+                    if acceptSimilar:
+                        for songInfo in song["tracks"]["items"]:
+                            if sameSong(songInfo, title, artist, acceptRemasters, acceptArticleChanges, 6):
+                                if verbose:
+                                    print("Found.")
+                                uris.append(songInfo["uri"])
+                                addedFiles.append(f)
+                                found = True
+                                break
+
+                    if not found:
+                        print("Error: Exact song not found. Will ask later.")
+                        postponedFiles.append(f)
+
         else:
             if verbose:
                 print("could not load metadata for '" + f + "'.")
             noMetadataFiles.append(f)
             continue
+
+    for f in postponedFiles:
+        metadata = ID3(f)
+        title = metadata['TIT2'].text[0]
+        artist = metadata['TPE1'].text[0]
+
+        if verbose:
+            print("Looking for " + title + " by " + artist + "...")
+
+        url = "https://api.spotify.com/v1/search"
+        params = {"q": "track:" + title + " artist:" + artist, "type": "track", "limit": 8}
+        response = get(url, params)
+        if response.status_code != 200:
+            print("Error: spotify search returned status code " + str(response.status_code) + ".")
+            print(response.content)
+            notAddedFiles.append(f)
+            continue
+
+        song = json.loads(response.content.decode('utf-8'))
+
+        print("Closest matches for " + title + " by " + artist + ":")
+        print("1) Don't add anything")
+        for i in range(0, len(song["tracks"]["items"])):
+            songInfo = song["tracks"]["items"][i]
+            print(str(i + 2) + ") " + songInfo["name"] + " by " + ", ".join(getArtists(songInfo)))
+
+        answer = input("Song to add? [2] ")
+
+        if answer == "":
+            answer = "2"
+
+        if answer.isdigit() and int(answer) - 2 < len(song["tracks"]["items"]) and int(answer) != 1:
+            i = int(answer) - 2
+            uris.append(song["tracks"]["items"][i]["uri"])
+            addedFiles.append(f)
+        else:
+            notAddedFiles.append(f)
+
+
+    for f in noMetadataFiles:
+        url = "https://api.spotify.com/v1/search"
+        params = {"q": f[:4], "type": "track", "limit": 8}
+        response = get(url, params)
+        if response.status_code != 200:
+            print("Error: spotify search returned status code " + str(response.status_code) + ".")
+            print(response.content)
+            notAddedFiles.append(f)
+            continue
+
+        song = json.loads(response.content.decode('utf-8'))
+
+        print("Closest matches for " + f + ":")
+        print("1) Don't add anything")
+        for i in range(0, len(song["tracks"]["items"])):
+            songInfo = song["tracks"]["items"][i]
+            print(str(i + 2) + ") " + songInfo["name"] + " by " + ", ".join(getArtists(songInfo)))
+
+        answer = input("Song to add? [2] ")
+
+        if answer == "":
+            answer = "2"
+
+        if answer.isdigit() and int(answer) - 2 < len(song["tracks"]["items"]) and int(answer) != 1:
+            i = int(answer) - 2
+            uris.append(song["tracks"]["items"][i]["uri"])
+            addedFiles.append(f)
+        else:
+            notAddedFiles.append(f)
+
 
     addToPlaylist(me, playlist, uris)
 
