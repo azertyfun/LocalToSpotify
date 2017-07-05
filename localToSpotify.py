@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import re
 import sys
 import requests
 import json
@@ -28,7 +29,7 @@ def getToken():
     response = requests.post("https://accounts.spotify.com/api/token", data=auth_data, headers=auth_headers)
 
     if response.status_code != 200:
-        print("Error: Authentication returned status code " + str(response.status_code) + ".")
+        print("Error: Cannot get token; Authentication returned status code " + str(response.status_code) + ".")
         print(response.content)
         exit() # TODO
 
@@ -42,11 +43,13 @@ def refreshToken():
     response = requests.post("https://accounts.spotify.com/api/token", data=refresh_data, headers=refresh_headers)
 
     if response.status_code != 200:
-        print("Error: Authentication returned status code " + str(response.status_code) + ".")
+        print("Error: Cannot refresh token; Authentication returned status code " + str(response.status_code) + ".")
         print(response.content)
         exit() # TODO
 
-    global_token = json.loads(response.content.decode('utf-8'))
+    response_json = json.loads(response.content.decode('utf-8'))
+    global_token['access_token'] = response_json['access_token']
+    global_token['expires_in'] = response_json['expires_in']
 
     with open(TOKEN_FILE, "w") as f:
         f.write(json.dumps(global_token))
@@ -137,11 +140,22 @@ def sameSong(songInfo, title, artist, acceptRemasters, acceptArticleChanges, max
 
     for a in songInfo["artists"]:
         articleChange = acceptArticleChanges and jellyfish.levenshtein_distance(a["name"].lower()[4:], artist.lower()) <= maxDistance
-        articleChange = articleChange or (acceptArticleChanges and a["name"].lower().contains(artist.lower()))
+        articleChange = articleChange or (acceptArticleChanges and (artist.lower() in a["name"].lower()))
         if jellyfish.levenshtein_distance(a["name"].lower(), artist.lower()) <= maxDistance or articleChange:
             return True
 
     return False
+
+def getSongFromFilename(f):
+    f = os.path.splitext(os.path.basename(f))[0]
+    f = re.sub('\\(.*\\)', '', f)
+    f = re.sub('\\[.*\\]', '', f)
+    f = re.sub('\\-', ' ', f)
+    f = re.sub(' LP ', ' ', f)
+    f = re.sub(' SP ', ' ', f)
+    f = re.sub(' +', ' ', f)
+
+    return f
 
 
 # Check argv
@@ -311,8 +325,9 @@ with open(TOKEN_FILE) as f:
 
 
     for f in noMetadataFiles:
+        f_clean = getSongFromFilename(f)
         url = "https://api.spotify.com/v1/search"
-        params = {"q": f[:4], "type": "track", "limit": 8}
+        params = {"q": f_clean, "type": "track", "limit": 8}
         response = get(url, params)
         if response.status_code != 200:
             print("Error: spotify search returned status code " + str(response.status_code) + ".")
@@ -322,23 +337,26 @@ with open(TOKEN_FILE) as f:
 
         song = json.loads(response.content.decode('utf-8'))
 
-        print("Closest matches for " + f + ":")
-        print("1) Don't add anything")
-        for i in range(0, len(song["tracks"]["items"])):
-            songInfo = song["tracks"]["items"][i]
-            print(str(i + 2) + ") " + songInfo["name"] + " by " + ", ".join(getArtists(songInfo)))
+        if len(song["tracks"]["items"]) > 0:
 
-        answer = input("Song to add? [2] ")
+            print("Closest matches for " + f_clean + ":")
+            print("1) Don't add anything")
+            for i in range(0, len(song["tracks"]["items"])):
+                songInfo = song["tracks"]["items"][i]
+                print(str(i + 2) + ") " + songInfo["name"] + " by " + ", ".join(getArtists(songInfo)))
 
-        if answer == "":
-            answer = "2"
+            answer = input("Song to add? [2] ")
 
-        if answer.isdigit() and int(answer) - 2 < len(song["tracks"]["items"]) and int(answer) != 1:
-            i = int(answer) - 2
-            uris.append(song["tracks"]["items"][i]["uri"])
-            addedFiles.append(f)
+            if answer == "":
+                answer = "2"
+
+            if answer.isdigit() and int(answer) - 2 < len(song["tracks"]["items"]) and int(answer) != 1:
+                i = int(answer) - 2
+                uris.append(song["tracks"]["items"][i]["uri"])
+                addedFiles.append(f)
+                noMetadataFiles.remove(f)
         else:
-            notAddedFiles.append(f)
+            print("Could not match anything for " + f_clean + ".")
 
 
     addToPlaylist(me, playlist, uris)
